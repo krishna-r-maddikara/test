@@ -1,0 +1,84 @@
+from flask import Flask, request
+import pandas as pd
+import numpy as np
+from vzcalendar import cal
+import json
+import teradatasql
+import pickle
+import os
+from os.path import join, dirname
+from configparser import ConfigParser
+from datetime import date, datetime
+import re
+
+
+app = Flask(__name__)
+
+APP_VERSION = '0.1.1'
+MODEL_VERSION = '1.0.0'
+MODEL_RUN_ID = '805647e937f341b8b9f13ff5511281a4'
+
+config = ConfigParser()
+config.read(join(dirname(__file__), 'env.config'))
+
+TERADATA_HOST = config['database']['host']
+INFERENCE_DATABASE_NAME = config['database']['inference_database_name']
+INFERENCE_TABLE_NAME = config['database']['inference_table_name']
+PORT_NUMBER = config['network']['port']
+
+TERADATA_USERNAME = os.environ.get('TERADATA_USERNAME')
+TERADATA_PASSWORD = os.environ.get('TERADATA_PASSWORD')
+
+def validate_request(data):
+    order_id = data.get('serviceOrderId')
+    if not re.fullmatch('^[0-9]*$', order_id):
+        error = {
+            'errorName' : 'INVALID_ORDER_ID',
+            'errorDesc' : f"orderID {order_id} is not a valid orderID. Only numeric orders are acceptable."
+        }
+        return False, error
+    return True, []
+
+
+def grab_context(order_number):
+
+    try:
+        con = teradatasql.connect(
+            host=TERADATA_HOST,
+            user=TERADATA_USERNAME,
+            password=TERADATA_PASSWORD
+        )
+
+        query = f'''
+            SELECT TOP 1 *
+            FROM {INFERENCE_DATABASE_NAME}.{INFERENCE_TABLE_NAME}
+            WHERE {INFERENCE_TABLE_NAME}.tin = 'UNO.{order_number}'
+            '''
+
+        ctx = pd.read_sql(query, con)
+
+        ctx.columns = [c.lower().replace(INFERENCE_TABLE_NAME, '') for c in ctx.columns]
+    except teradatasql.OperationalError: 
+        if TERADATA_USERNAME is None or TERADATA_PASSWORD is None:
+            errors = {
+                'errorName' : 'TERADATA_CREDENTIALS_MISSING',
+                'errorDesc' : "Missing Teradata credentials"
+            }
+        else:
+            errors = {
+                'errorName' : 'UNKNOWN_TERADATA_ERROR',
+                'errorDesc' : "Unable to identify issue grabbing model context"
+            }
+        return None, errors
+
+    if len(ctx) == 0:
+        errors = {
+            'errorName' : 'INVALID_ORDER_ID',
+            'errorDesc' : f"orderId '{order_number}' was not found in the inference set"
+        }
+    else:
+        errors = None
+
+    con.close()
+
+    return ctx, errors
